@@ -28,6 +28,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Properties;
@@ -464,7 +465,10 @@ public class ConsumerGroupService {
         .map(ConsumerGroupListing::groupId)
         .toList();
     return ac.describeConsumerGroups(sortedGroups)
-        .map(descrMap -> sortedGroups.stream().map(descrMap::get).toList());
+        // describeConsumerGroups omits groups we are not authorized to describe, so a name we
+        // listed may have no description. Dropping them keeps this list free of nulls, which
+        // getConsumerGroup() would otherwise dereference.
+        .map(descrMap -> sortedGroups.stream().map(descrMap::get).filter(Objects::nonNull).toList());
   }
 
   private <T> Stream<T> sortAndPaginate(Collection<T> collection,
