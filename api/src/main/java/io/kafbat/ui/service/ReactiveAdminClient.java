@@ -78,6 +78,7 @@ import org.apache.kafka.common.acl.AclBindingFilter;
 import org.apache.kafka.common.acl.AclOperation;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.errors.ClusterAuthorizationException;
+import org.apache.kafka.common.errors.GroupAuthorizationException;
 import org.apache.kafka.common.errors.GroupIdNotFoundException;
 import org.apache.kafka.common.errors.GroupNotEmptyException;
 import org.apache.kafka.common.errors.GroupSubscribedToTopicException;
@@ -531,8 +532,22 @@ public class ReactiveAdminClient implements Closeable {
         groupIds,
         properties.getDescribeConsumerGroupsPartitionSize(),
         properties.getDescribeConsumerGroupsConcurrency(),
-        ids -> toMono(client.describeConsumerGroups(ids).all()),
+        this::describeConsumerGroupsImpl,
         mapMerger()
+    );
+  }
+
+  private Mono<Map<String, ConsumerGroupDescription>> describeConsumerGroupsImpl(Collection<String> groupIds) {
+    return toMonoWithExceptionFilter(
+        client.describeConsumerGroups(groupIds).describedGroups(),
+        // We only describe groups we saw from listConsumerGroups(), so we should have permission to do it.
+        // Managed offerings break that assumption: Google Cloud Managed Service for Apache Kafka lists an
+        // internal prober group (__internal_google_managed_kafka_prober_cg) that no principal can be granted
+        // DESCRIBE on, so on any cluster with ACLs enabled this fails for that one group. Using .all() made
+        // that failure fatal to the whole cluster scrape, which left the UI showing the cluster as offline
+        // with zero brokers and zero topics. Skipping the groups we cannot describe mirrors what
+        // describeTopicsImpl already does for TopicAuthorizationException.
+        GroupAuthorizationException.class
     );
   }
 
@@ -542,14 +557,20 @@ public class ReactiveAdminClient implements Closeable {
                                                                             // all partitions if null passed
                                                                             @Nullable List<TopicPartition> partitions) {
     Function<Collection<String>, Mono<Map<String, Map<TopicPartition, OffsetAndMetadata>>>> call =
-        groups -> toMono(
-            client.listConsumerGroupOffsets(
-                groups.stream()
-                    .collect(Collectors.toMap(
-                        g -> g,
-                        g -> new ListConsumerGroupOffsetsSpec().topicPartitions(partitions)
-                    ))).all()
-        );
+        groups -> {
+          var result = client.listConsumerGroupOffsets(
+              groups.stream()
+                  .collect(Collectors.toMap(
+                      g -> g,
+                      g -> new ListConsumerGroupOffsetsSpec().topicPartitions(partitions)
+                  )));
+          // Per-group futures rather than .all(), for the reason described on describeConsumerGroupsImpl:
+          // one group we are not allowed to read must not fail the offsets of every other group.
+          return toMonoWithExceptionFilter(
+              groups.stream().collect(Collectors.toMap(g -> g, result::partitionsToOffsetAndMetadata)),
+              GroupAuthorizationException.class
+          );
+        };
 
     Mono<Map<String, Map<TopicPartition, OffsetAndMetadata>>> merged = partitionCalls(
         consumerGroups,
