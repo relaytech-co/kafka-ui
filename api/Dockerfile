@@ -5,6 +5,12 @@
 FROM azul/zulu-openjdk-alpine:25.0.4.1-jre-headless@sha256:24e8c28e9bff1657f035e75873ca5a61e2b7aee64f64d0619622af7ef950b1d9
 
 RUN apk upgrade --no-cache
+# Drop the roots behind the compromised eMudhra intermediates (INC-4891,
+# https://emudhra.we-have-a-problem.com/) from the JDK's cacerts, which the Kafka
+# client's SASL_SSL connection trusts. The apk upgrade above already takes them out of
+# the Alpine bundle; Zulu has not shipped a cacerts without them yet.
+RUN keytool -delete -cacerts -storepass changeit -alias 'emsigneccrootcag3 [jdk]' \
+    && keytool -delete -cacerts -storepass changeit -alias 'comodoaaaca [jdk]'
 RUN apk add --no-cache \
     # snappy codec
     gcompat \
